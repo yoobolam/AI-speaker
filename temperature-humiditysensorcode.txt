@@ -1,0 +1,109 @@
+#include "DHT.h"
+#include <LiquidCrystal_I2C.h>
+#include<Servo.h>
+#include<IRremote.h>
+#include <SoftwareSerial.h>
+
+#define DHTPIN 2
+#define DHTTYPE DHT11
+
+DHT dht(DHTPIN, DHTTYPE);
+
+int RECV_PIN = 13;
+IRrecv irrecv(RECV_PIN);
+
+int motor1 = 7;
+int motor2 = 8;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+Servo servo1;
+Servo servo2;
+
+int angle;
+
+void setup() {
+  Serial.begin(9600);
+  irrecv.enableIRIn();
+  dht.begin();
+
+  pinMode(10, OUTPUT);
+  pinMode(11, OUTPUT);
+
+  lcd.begin(16,2);
+
+  servo1.attach(motor1);
+  servo2.attach(motor2);
+
+
+}
+
+int i1 = 0, i2 = 0, i3 = 0;
+
+void loop() {
+
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  char input = Serial.read();
+  if (input == 'A') { //1¹ø¹æ ºÒ Å´
+    digitalWrite(11, HIGH);
+  } else if (input == 'B') { //1¹ø¹æ ºÒ²û
+    digitalWrite(11, LOW);
+  } else if (input == 'G') { //2¹ø¹æ ºÒÅ´
+    digitalWrite(10, HIGH);
+  } else if (input == 'H') { //2¹ø¹æ ºÒ²û
+    digitalWrite(10, LOW);
+  } else if (input == 'C') { //1¹ø¹æ ¹®¿°
+    for (angle = 0; angle < 90; angle++) {
+      servo1.write(angle);
+      delay(500);
+    }
+  } else if (input == 'D') { //1¹ø¹æ ¹®´ÝÀ½
+    for (angle = 90; angle < 0; angle--) {
+      servo1.write(angle);
+      delay(500);
+    }
+  } else if (input == 'I') { //2¹ø¹æ ¹®¿°
+    for (angle = 0; angle < 90; angle++) {
+      servo2.write(angle);
+      delay(500);
+    }
+  } else if (input == 'J') { //2¹ø¹æ ¹®´ÝÀ½
+    for (angle = 90; angle < 0; angle--) {
+      servo2.write(angle);
+      delay(500);
+    }
+  } else if (input == 'E') { //¿Â½Àµµ ÄÑÁà
+    lcd.backlight();
+
+    if (isnan(humidity) || isnan(temperature) )
+    {
+      Serial.println("Failed to read from DHT sensor!");
+      return;
+    }
+    Serial.print((int)temperature);
+    Serial.print(" *C, ");
+    Serial.print((int)humidity);
+    Serial.println(" %");
+
+    String humi = "Humi : ";
+    humi += (String)humidity;
+    humi += "%";
+    String temp = "temp : ";
+    temp += (String)temperature;
+    temp += "C";
+
+    lcd.setCursor(0, 0);
+    lcd.print(humi);
+    lcd.setCursor(0, 1);
+    lcd.print(temp);
+
+    delay(1500);
+  } else if (input == 'F') { //¿Â½Àµµ ²¨Áü
+    lcd.noBacklight();
+  }
+
+
+
+}
