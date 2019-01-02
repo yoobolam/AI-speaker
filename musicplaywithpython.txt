@@ -1,0 +1,879 @@
+#!/usr/bin/env python
+
+# -*- coding: utf-8 -*-
+
+ 
+
+"""Example 2: STT - getVoice2Text """
+
+ 
+
+from __future__ import print_function
+
+ 
+
+import grpc
+
+ 
+
+import gigagenieRPC_pb2
+
+import gigagenieRPC_pb2_grpc
+
+ 
+
+import os
+
+import datetime
+
+import hmac
+
+import hashlib
+
+ 
+
+# Config for GiGA Genie gRPC
+
+CLIENT_ID = 'Y2xpZW50X2lkMTU0NTQ1MjI4MzUwOQ=='
+
+CLIENT_KEY = 'Y2xpZW50X2tleTE1NDU0NTIyODM1MDk='
+
+CLIENT_SECRET = 'Y2xpZW50X3NlY3JldDE1NDU0NTIyODM1MDk='
+
+HOST = 'gate.gigagenie.ai'
+
+PORT = 4080
+
+ 
+
+### COMMON : Client Credentials ###
+
+def getMetadata():
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
+
+    message = CLIENT_ID + ':' + timestamp
+
+ 
+
+    signature = hmac.new(CLIENT_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+ 
+
+    metadata = [('x-auth-clientkey', CLIENT_KEY),
+
+                ('x-auth-timestamp', timestamp),
+
+                ('x-auth-signature', signature)]
+
+ 
+
+    return metadata
+
+ 
+
+def credentials(context, callback):
+
+    callback(getMetadata(), None)
+
+ 
+
+def getCredentials():
+
+    with open('../data/ca-bundle.pem', 'rb') as f:
+
+        trusted_certs = f.read()
+
+    sslCred = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
+
+ 
+
+    authCred = grpc.metadata_call_credentials(credentials)
+
+ 
+
+    return grpc.composite_channel_credentials(sslCred, authCred)
+
+ 
+
+### END OF COMMON ###
+
+ 
+
+### STT
+
+import pyaudio
+
+import audioop
+
+from six.moves import queue
+
+ 
+
+import RPi.GPIO as GPIO
+
+import serial
+
+import time
+
+ 
+
+ 
+
+GPIO.setmode(GPIO.BCM)
+
+#GPIO.setup(10, GPIO.IN)
+
+#GPIO.setup(17, GPIO.OUT)
+
+#GPIO.output(17, False)
+
+ 
+
+FORMAT = pyaudio.paInt16
+
+CHANNELS = 1
+
+RATE = 16000
+
+CHUNK = 512
+
+ 
+
+# MicrophoneStream - original code in https://goo.gl/7Xy3TT
+
+class MicrophoneStream(object):
+
+    """Opens a recording stream as a generator yielding the audio chunks."""
+
+    def __init__(self, rate, chunk):
+
+        self._rate = rate
+
+        self._chunk = chunk
+
+ 
+
+        # Create a thread-safe buffer of audio data
+
+        self._buff = queue.Queue()
+
+        self.closed = True
+
+ 
+
+    def __enter__(self):
+
+        self._audio_interface = pyaudio.PyAudio()
+
+        self._audio_stream = self._audio_interface.open(
+
+            format=pyaudio.paInt16,
+
+            channels=1, rate=self._rate,
+
+            input=True, frames_per_buffer=self._chunk,
+
+            # Run the audio stream asynchronously to fill the buffer object.
+
+            # This is necessary so that the input device's buffer doesn't
+
+            # overflow while the calling thread makes network requests, etc.
+
+            stream_callback=self._fill_buffer,
+
+        )
+
+ 
+
+        self.closed = False
+
+ 
+
+        return self
+
+ 
+
+    def __exit__(self, type, value, traceback):
+
+        self._audio_stream.stop_stream()
+
+        self._audio_stream.close()
+
+        self.closed = True
+
+        # Signal the generator to terminate so that the client's
+
+        # streaming_recognize method will not block the process termination.
+
+        self._buff.put(None)
+
+        self._audio_interface.terminate()
+
+ 
+
+    def _fill_buffer(self, in_data, frame_count, time_info, status_flags):
+
+        """Continuously collect data from the audio stream, into the buffer."""
+
+        self._buff.put(in_data)
+
+        return None, pyaudio.paContinue
+
+ 
+
+    def generator(self):
+
+        while not self.closed:
+
+            # Use a blocking get() to ensure there's at least one chunk of
+
+            # data, and stop iteration if the chunk is None, indicating the
+
+            # end of the audio stream.
+
+            chunk = self._buff.get()
+
+            if chunk is None:
+
+                return
+
+            data = [chunk]
+
+ 
+
+            # Now consume whatever other data's still buffered.
+
+            while True:
+
+                try:
+
+                    chunk = self._buff.get(block=False)
+
+                    if chunk is None:
+
+                        return
+
+                    data.append(chunk)
+
+                except queue.Empty:
+
+                    break
+
+ 
+
+            yield b''.join(data)
+
+# [END audio_stream]
+
+ 
+
+def print_rms(rms):
+
+    out = ''
+
+    for _ in range(int(round(rms/30))):
+
+        out = out + '*'
+
+    
+
+    print (out)
+
+    
+
+ 
+
+import wave
+
+ 
+
+def play_file(fname):
+
+    # create an audio object
+
+    wf = wave.open(fname, 'rb')
+
+    p = pyaudio.PyAudio()
+
+    chunk = 1024
+
+ 
+
+    # open stream based on the wave object which has been input.
+
+    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+
+                    channels=wf.getnchannels(),
+
+                    rate=wf.getframerate(),
+
+                    output=True)
+
+ 
+
+    # read data (based on the chunk size)
+
+    data = wf.readframes(chunk)
+
+ 
+
+    # play stream (looping from beginning of file to the end)
+
+    while len(data) > 0:
+
+        # writing to the stream is what *actually* plays the sound.
+
+        stream.write(data)
+
+        data = wf.readframes(chunk)
+
+ 
+
+        # cleanup stuff.
+
+    stream.close()
+
+    p.terminate() 
+
+ 
+
+# KWS
+
+ 
+
+import ktkws
+
+KWSID = ['기가지니', '지니야', '친구야', '자기야']
+
+ 
+
+def detect():
+
+    
+
+    with MicrophoneStream(RATE, CHUNK) as stream:
+
+        audio_generator = stream.generator()
+
+ 
+
+        for content in audio_generator:
+
+ 
+
+            rc = ktkws.detect(content)
+
+            rms = audioop.rms(content,2)
+
+            print('audio rms = %d' % (rms))
+
+ 
+
+            if (rc == 1):
+
+                play_file("../data/sample_sound.wav")
+
+                return 200
+
+ 
+
+def test():
+
+    rc = ktkws.init("../data/kwsmodel.pack")
+
+    print ('init rc = %d' % (rc))
+
+    rc = ktkws.start()
+
+    print ('start rc = %d' % (rc))
+
+    ktkws.set_keyword(KWSID.index('지니야'))
+
+    rc = detect()
+
+    print ('detect rc = %d' % (rc))
+
+    ktkws.stop()
+
+ 
+
+def generate_request():
+
+ 
+
+    with MicrophoneStream(RATE, CHUNK) as stream:
+
+        audio_generator = stream.generator()
+
+    
+
+        for content in audio_generator:
+
+            message = gigagenieRPC_pb2.reqVoice()
+
+            message.audioContent = content
+
+            yield message
+
+            
+
+            rms = audioop.rms(content,2)
+
+            print_rms(rms)
+
+ 
+
+def getVoice2Text():	
+
+ 
+
+    print ("Ctrl+\ to quit ...")
+
+	
+
+    channel = grpc.secure_channel('{}:{}'.format(HOST, PORT), getCredentials())
+
+    stub = gigagenieRPC_pb2_grpc.GigagenieStub(channel)
+
+    request = generate_request()
+
+    resultText = ''
+
+    for response in stub.getVoice2Text(request):
+
+        if response.resultCd == 200: # partial
+
+            print('resultCd=%d | recognizedText= %s' 
+
+                  % (response.resultCd, response.recognizedText))
+
+            resultText = response.recognizedText
+
+        elif response.resultCd == 201: # final
+
+            print('resultCd=%d | recognizedText= %s' 
+
+                  % (response.resultCd, response.recognizedText))
+
+            resultText = response.recognizedText
+
+            break
+
+        else:
+
+            print('resultCd=%d | recognizedText= %s' 
+
+                  % (response.resultCd, response.recognizedText))
+
+            break
+
+ 
+
+    print ("TEXT: %s" % (resultText))
+
+    return resultText
+
+ 
+
+def main():
+
+    
+
+ 
+
+    # STT
+
+    ser = serial.Serial('/dev/ttyACM0', 9600)
+
+    entry = True
+
+    
+
+    try:
+
+        test()
+
+    except:
+
+        print('error')
+
+    else:
+
+        #test()
+
+        
+
+    
+
+    
+
+        while entry == True:
+
+            
+
+        #GPIO.output(17, False) 
+
+ 
+
+            text = getVoice2Text()
+
+            
+
+            search1 = u"음악 틀어줘"
+
+            search11 = u"확인"
+
+            search12 = u"뒤로"
+
+            search13 = u"볼륨 올려줘"
+
+            search14 = u"볼륨 내려줘"
+
+            search15 = u"일시 정지"
+
+            search155 = u"재생"
+
+            search16 = u"tv 꺼줘"
+
+            search17 = u"왼쪽"
+
+            search18 = u"오른쪽"
+
+            search19 = u"위"
+
+            search20 = u"아래"
+
+            
+
+            search31 = u"1번 방 불 켜줘"
+
+            search32 = u"1번 방 불 꺼줘"
+
+            search33 = u"1번 방 문 열어"
+
+            search34 = u"1번 방 문 닫어"
+
+            search35 = u"온습도 보여줘"
+
+            search36 = u"화면 꺼줘"
+
+            search37 = u"2번 방 불 켜줘"
+
+            search38 = u"2번 방 불 꺼줘"
+
+            search39 = u"2번 방 문 열어"
+
+            search40 = u"2번 방 문 닫어"
+
+                        
+
+            search99 = u"잠자기"
+
+            search100 = u"절전모드"
+
+            search101 = u"고마워"
+
+            
+
+            search0 = u"더"
+
+            search00 = u"the"
+
+            
+
+            print(text)
+
+            
+
+            if search in text:
+
+                #GPIO.output(17, True)
+
+                time.sleep(1)
+
+                entry = False
+
+               
+
+                #pritn "LED  가 켜졌습니다."
+
+                #GPIO.cleanup()
+
+                
+
+            elif search1 in text:
+
+                str1 = '1'
+
+                ser.write(str1.encode())
+
+                time.sleep(1)
+
+            
+
+            elif search11 in text:
+
+                str11 = 'a' #확인
+
+                ser.write(str11.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search12 in text:
+
+                str12 = 'b' #뒤로
+
+                ser.write(str12.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search13 in text:
+
+                str13 = 'c' #볼륨내려줘
+
+                ser.write(str13.encode())
+
+                stemp = str13
+
+                time.sleep(1)
+
+ 
+
+            elif search14 in text:
+
+                str14 = 'd' #볼륨올려줘
+
+                ser.write(str14.encode())
+
+                stemp = str14
+
+                time.sleep(1)
+
+                
+
+            elif search15 in text or search155 in text:
+
+                str15 = 'e' # 일시정지 및 재생
+
+                ser.write(str15.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search16 in text:
+
+                str16 = 'f' # tv 꺼줘
+
+                ser.write(str16.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search17 in text:
+
+                str17 = 'g' # 왼쪽
+
+                ser.write(str17.encode())
+
+                stemp = str17
+
+                time.sleep(1)
+
+                
+
+            elif search18 in text:
+
+                str18 = 'h' # 오른쪽
+
+                ser.write(str18.encode())
+
+                stemp = str18
+
+                time.sleep(1)
+
+                
+
+            elif search19 in text:
+
+                str19 = 'i' # 오른쪽
+
+                ser.write(str19.encode())
+
+                stemp = str19
+
+                time.sleep(1)
+
+                
+
+            elif search20 in text:
+
+                str20 = 'j' # 오른쪽
+
+                ser.write(str20.encode())
+
+                stemp = str20
+
+                time.sleep(1)
+
+                
+
+            elif search31 in text:
+
+                str31 = 'A' #불
+
+                ser.write(str31.encode())
+
+                time.sleep(1)
+
+            
+
+            elif search32 in text:
+
+                str32 = 'B' #불 꺼
+
+                ser.write(str32.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search33 in text:
+
+                str33 = 'C' #문 열어
+
+                ser.write(str33.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search34 in text:
+
+                str34 = 'D' #문 닫어
+
+                ser.write(str34.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search35 in text:
+
+                str35 = 'E' #온습도 보여줘
+
+                ser.write(str35.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search36 in text:
+
+                str36 = 'F' #화면 꺼줘
+
+                ser.write(str36.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search37 in text:
+
+                str37 = 'G' #온습도 보여줘
+
+                ser.write(str37.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search38 in text:
+
+                str38 = 'H' #화면 꺼줘
+
+                ser.write(str38.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search39 in text:
+
+                str39 = 'I' #문 열어
+
+                ser.write(str39.encode())
+
+                time.sleep(1)
+
+                
+
+            elif search40 in text:
+
+                str40 = 'J' #문 닫어
+
+                ser.write(str40.encode())
+
+                time.sleep(1)
+
+                
+
+                     
+
+                
+
+                
+
+            elif search99 in text:
+
+                #entry = False
+
+                test()
+
+                time.sleep(1)
+
+                
+
+            elif search100 in text:
+
+                #entry = False
+
+                test()
+
+                time.sleep(1)
+
+                
+
+            elif search101 in text:
+
+                #entry = False
+
+                test()
+
+                time.sleep(1)                
+
+            
+
+            elif search0 in text or search00 in text:
+
+                #entry = False
+
+                ser.write(stemp.encode())
+
+                time.sleep(1)
+
+            
+
+	
+
+ 
+
+if __name__ == '__main__':
+
+   main()
